@@ -244,22 +244,57 @@ FIRM NETWORK SOURCES
     return msg.content[0].text
 
 
-def summarize_breaking(articles: list) -> str:
-    prompt = f"""Breaking tech stories trending on Hacker News right now.
-Write a plain-text alert, max 3 stories.
-For each: headline on its own line, then 3-4 sentences (what happened, why it matters \
-to a VC/tech professional, any immediate implication), then the URL on its own line.
-No markdown. No filler. Skip US politics, local emergencies, celebrity news.
+def check_and_summarize_breaking(buckets: dict) -> str | None:
+    """
+    Ask Claude to decide if anything in the last 6 hours is genuinely breaking.
+    Returns a formatted alert string if yes, None if nothing warrants an alert.
+    """
+    all_articles = (
+        buckets.get("tech", []) +
+        buckets.get("deals", []) +
+        buckets.get("vc", [])
+    )
+    if not all_articles:
+        return None
 
-Stories:
-{_format_bucket(articles)}"""
+    articles_text = _format_bucket(all_articles)
+
+    prompt = f"""You are a filter for a European VC partner's breaking news alerts.
+Decide if anything below is genuinely breaking — not just interesting or viral.
+
+QUALIFIES as breaking:
+- Funding round above $50M just announced
+- Major acquisition or merger announced
+- IPO filing or direct listing announced
+- Significant regulatory decision directly affecting tech
+- Major product launch from a top-tier tech company (Apple, Google, Microsoft, Meta, Anthropic, OpenAI, Nvidia)
+- A VC firm closing a significant new fund
+
+DOES NOT QUALIFY — return NOTHING:
+- Interesting research or experiments
+- Viral or funny stories
+- Military, political, or government news unless directly about tech regulation
+- Anything that can wait until the next scheduled digest
+
+If NO qualifying stories: respond with exactly the word NOTHING and nothing else.
+
+If YES: write a plain-text alert for up to 3 qualifying stories.
+For each: headline on its own line, 3-4 sentences (what happened, why it matters, immediate implication), then the URL on its own line. Blank line between stories.
+No markdown. No filler.
+
+Articles:
+{articles_text}"""
 
     msg = Anthropic(api_key=ANTHROPIC_API_KEY).messages.create(
         model="claude-opus-4-5",
         max_tokens=1000,
         messages=[{"role": "user", "content": prompt}]
     )
-    return msg.content[0].text
+    result = msg.content[0].text.strip()
+
+    if result.upper().startswith("NOTHING"):
+        return None
+    return result
 
 # ── HTML renderer ─────────────────────────────────────────────────────────────
 
@@ -421,15 +456,19 @@ def run_digest():
 
 
 def run_breaking_check():
-    print("[breaking] Checking HN for viral stories...")
-    hot = fetch_hn_top(min_score=HN_BREAKING_THRESHOLD)
-    if not hot:
-        print(f"[breaking] Nothing above {HN_BREAKING_THRESHOLD} points.")
+    print("[breaking] Fetching recent articles for relevance check...")
+    buckets = fetch_rss_articles(hours_back=6)
+    # Still include HN as one signal but not as the gatekeeper
+    buckets["tech"].extend(fetch_hn_top(min_score=100))
+
+    summary = check_and_summarize_breaking(buckets)
+    if not summary:
+        print("[breaking] Nothing qualifies as breaking news.")
         return
-    print(f"[breaking] {len(hot)} hot stories — sending alert...")
-    summary = summarize_breaking(hot)
+
+    print("[breaking] Breaking story found — sending alert...")
     send_email(
-        subject=f"Breaking — {hot[0]['title'][:60]}",
+        subject="Breaking — tech & VC alert",
         body=summary,
         is_breaking=True,
     )
