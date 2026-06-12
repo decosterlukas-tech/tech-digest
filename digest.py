@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Tech news digest — Mon/Wed/Fri + breaking news alerts via Gmail.
+Tech news digest — daily 08:00 Brussels + breaking news alerts via Gmail.
 Three tracks: tech & product, deals & funding, VC firm network.
 """
 
@@ -29,6 +29,7 @@ RSS_FEEDS = [
     ("deals", "Crunchbase News",      "https://news.crunchbase.com/feed/"),
     ("deals", "StrictlyVC",           "https://strictlyvc.com/feed/"),
     ("deals", "Axios Pro Rata",       "https://www.axios.com/pro/deals/rss"),
+    ("deals", "TechCrunch",           "https://techcrunch.com/feed/"),
     ("vc",    "Fortune Term Sheet",   "https://fortune.com/tag/term-sheet/feed/"),
     ("vc",    "PitchBook News",       "https://pitchbook.com/news/rss"),
     ("vc",    "StrictlyVC",           "https://strictlyvc.com/feed/"),
@@ -45,22 +46,15 @@ TOPICS_IGNORE = [
     "personal finance tips and listicles",
 ]
 
-VC_FIRMS_ONLY = [
-    "venture capital firms",
-    "tech-focused growth equity firms",
-    "tech-focused PE firms",
-]
-
 VC_EXCLUDE = [
     "investment banks (Goldman, Morgan Stanley, JP Morgan, etc.)",
     "hedge funds",
     "generalist asset managers",
-    "sovereign wealth funds unless directly investing in VC",
     "retail banks",
 ]
 
 HN_BREAKING_THRESHOLD = int(os.getenv("HN_BREAKING_THRESHOLD", "300"))
-MAX_ARTICLES_PER_FEED = 15
+MAX_ARTICLES_PER_FEED = 20
 LOOKBACK_HOURS        = 48
 
 ANTHROPIC_API_KEY  = os.environ["ANTHROPIC_API_KEY"]
@@ -100,12 +94,10 @@ def fetch_rss_articles(hours_back: int = LOOKBACK_HOURS) -> dict:
 
 
 def fetch_article_text(url: str, max_chars: int = 3000) -> str:
-    """Fetch full article text for richer summarization."""
     try:
-        r = requests.get(url, timeout=8, headers={"User-Agent": "Mozilla/5.0"})
+        r    = requests.get(url, timeout=8, headers={"User-Agent": "Mozilla/5.0"})
         text = re.sub(r"<[^>]+>", " ", r.text)
         text = re.sub(r"\s+", " ", text).strip()
-        # Trim to roughly the middle content
         start = max(0, len(text) // 6)
         return text[start:start + max_chars]
     except Exception:
@@ -113,7 +105,6 @@ def fetch_article_text(url: str, max_chars: int = 3000) -> str:
 
 
 def enrich_top_articles(articles: list, n: int = 8) -> list:
-    """Fetch full text for the top n articles to give Claude more to work with."""
     enriched = []
     for a in articles[:n]:
         full = fetch_article_text(a["url"])
@@ -121,7 +112,7 @@ def enrich_top_articles(articles: list, n: int = 8) -> list:
     return enriched + articles[n:]
 
 
-def fetch_hn_top(min_score: int = HN_BREAKING_THRESHOLD) -> list:
+def fetch_hn_top(min_score: int = 100) -> list:
     try:
         top_ids = requests.get(
             "https://hacker-news.firebaseio.com/v0/topstories.json", timeout=10
@@ -154,75 +145,84 @@ def _format_article(a: dict) -> str:
 
 
 def _format_bucket(articles: list) -> str:
-    return "\n\n---\n\n".join(_format_article(a) for a in articles[:30])
+    return "\n\n---\n\n".join(_format_article(a) for a in articles[:35])
 
 # ── Summarize ─────────────────────────────────────────────────────────────────
 
 def summarize_digest(buckets: dict) -> str:
 
-    ignore_str   = "\n".join(f"- {t}" for t in TOPICS_IGNORE)
-    vc_only_str  = "\n".join(f"- {t}" for t in VC_FIRMS_ONLY)
-    vc_excl_str  = "\n".join(f"- {t}" for t in VC_EXCLUDE)
+    ignore_str  = "\n".join(f"- {t}" for t in TOPICS_IGNORE)
+    vc_excl_str = "\n".join(f"- {t}" for t in VC_EXCLUDE)
 
-    prompt = f"""You are writing a briefing for a European venture capital partner. \
-He reads this at 08:00 with coffee. He wants depth and signal, not summaries of summaries.
+    prompt = f"""You are writing a daily briefing for a European venture capital partner.
+He is NOT a technical person. He is a sharp business operator who cares about market dynamics, \
+competitive shifts, who is winning and losing, what money is moving where, and what it means \
+for the companies and sectors he invests in. He does not care how technology works under the hood.
 
-=== STRICT RULES — NEVER VIOLATE THESE ===
+AUDIENCE RULE — strictly enforced throughout every section:
+Write for a business reader, not an engineer. Never explain how a technology works. \
+Always explain what it means for markets, competition, investors, founders, or consumers. \
+"Google launched a new AI model" is not enough — tell him who it threatens, what business \
+it disrupts, and whether it changes the competitive landscape.
 
-1. OUTPUT ORDER IS FIXED. You must write the four sections in exactly this order, \
-with these exact headers on their own line, nothing else on that line:
+=== STRICT OUTPUT RULES ===
+
+1. Write the four sections in EXACTLY this order with EXACTLY these headers on their own line:
 
 SUMMARY
 TECH & PRODUCT
 DEALS & FUNDING
 FIRM NETWORK
 
-2. SUMMARY IS ALWAYS FIRST. It appears before any other section. No exceptions.
+2. SUMMARY IS FIRST. Always. No exceptions.
 
-3. IGNORE THESE TOPICS ENTIRELY — do not mention them anywhere in the digest:
+3. IGNORE these topics entirely — do not mention them anywhere:
 {ignore_str}
 
-4. FIRM NETWORK contains ONLY these types of organisations:
-{vc_only_str}
-NEVER include these in FIRM NETWORK:
-{vc_excl_str}
-If a story is about a bank or asset manager, drop it entirely.
+4. FIRM NETWORK: venture capital firms and tech-focused growth equity / PE only.
+Never include: {vc_excl_str}
+Drop any story about a bank or generalist asset manager entirely.
 
-5. DEALS & FUNDING must be split into three sub-tiers in this order:
+5. DEALS & FUNDING: split into exactly these three sub-headers in this order:
 LARGE (>$100M)
 MID ($10M–$100M)
 EARLY (<$10M or seed)
 Omit a tier only if there are genuinely zero deals for it.
+Target 8-12 deals total across all tiers. Include every deal you can find in the source articles.
 
-6. No markdown. No asterisks. No hyphens as bullets. Plain text only.
+6. Plain text only. No markdown, no asterisks, no hyphens as bullets.
 
-=== CONTENT INSTRUCTIONS ===
+=== SECTION INSTRUCTIONS ===
 
 SUMMARY
-Exactly 3 sentences. What are the dominant themes across tech, deals, and VC this period? \
-Write it like a partner pre-brief: sharp, direct, no filler.
+3 sentences. The dominant business themes of this period — what is the market doing, \
+where is money moving, what is the big story. Written like a partner pre-brief.
 
 TECH & PRODUCT
 5-6 stories. For each:
-Line 1: the headline (plain, no label)
-Lines 2+: 4-6 sentences of real analysis. What happened, the context, \
-why it matters strategically, any European or Asian angle.
-Final line: the URL
-Blank line after each story.
+- Headline on its own line
+- 4-5 sentences: what happened, what business or market it disrupts, who wins, who loses, \
+  any European angle. No technical explanation. Pure business and competitive impact.
+- URL on its own line
+- Blank line after each story
 
 DEALS & FUNDING
-After each tier sub-header, list every deal from the source articles in that tier.
-For each deal:
-Line 1: Company name — Amount — Stage — Sector
-Line 2-3: What the company does (1 sentence). Why this round matters (1 sentence).
-Line 4: Best available link (press release > news article > company website)
-Blank line after each deal.
+This section should look like the StrictlyVC deals newsletter. After each tier sub-header, \
+list every deal you can find. For each deal use this exact format:
+
+Company name, $amount, round stage. One sentence on what the company does in plain English \
+(no jargon). One sentence on why this round is notable — who led it, what it signals about \
+the sector, or what the company will do with the money. Link on its own line.
+
+Aim for 8-12 deals total. If you have more, include them. Do not truncate deals to hit a \
+word count. Every deal in the source articles should appear here.
 
 FIRM NETWORK
-VC and tech-focused growth equity / PE only — see strict rules above.
-3-5 items: fund closes, new funds, partner moves, LP dynamics, secondaries, strategy shifts.
-2-3 sentences per item. Blank line between items.
-If nothing material from VC/tech-PE sources: write exactly "Quiet period."
+VC and tech-focused growth equity / PE only.
+3-5 items: fund closes, new vehicles, partner moves, LP dynamics, secondaries activity, \
+strategy pivots. 2-3 sentences each. Business significance only — what does this mean \
+for the market, for founders, for LPs. Blank line between items.
+If nothing material: write exactly "Quiet period."
 
 === SOURCE ARTICLES ===
 
@@ -238,17 +238,13 @@ FIRM NETWORK SOURCES
 
     msg = Anthropic(api_key=ANTHROPIC_API_KEY).messages.create(
         model="claude-opus-4-5",
-        max_tokens=4000,
+        max_tokens=4500,
         messages=[{"role": "user", "content": prompt}]
     )
     return msg.content[0].text
 
 
 def check_and_summarize_breaking(buckets: dict) -> str | None:
-    """
-    Ask Claude to decide if anything in the last 6 hours is genuinely breaking.
-    Returns a formatted alert string if yes, None if nothing warrants an alert.
-    """
     all_articles = (
         buckets.get("tech", []) +
         buckets.get("deals", []) +
@@ -260,29 +256,30 @@ def check_and_summarize_breaking(buckets: dict) -> str | None:
     articles_text = _format_bucket(all_articles)
 
     prompt = f"""You are a filter for a European VC partner's breaking news alerts.
-Decide if anything below is genuinely breaking — not just interesting or viral.
+Decide if anything below warrants an immediate alert — not a scheduled digest.
 
-QUALIFIES as breaking:
+QUALIFIES:
 - Funding round above $50M just announced
 - Major acquisition or merger announced
 - IPO filing or direct listing announced
 - Significant regulatory decision directly affecting tech
-- Major product launch from a top-tier tech company (Apple, Google, Microsoft, Meta, Anthropic, OpenAI, Nvidia)
-- A VC firm closing a significant new fund
+- Major product launch from Apple, Google, Microsoft, Meta, Anthropic, OpenAI, or Nvidia
+- A VC firm closing a significant new fund (>$300M)
 
 DOES NOT QUALIFY — return NOTHING:
-- Interesting research or experiments
+- Interesting research, experiments, or technical announcements
 - Viral or funny stories
 - Military, political, or government news unless directly about tech regulation
-- Anything that can wait until the next scheduled digest
+- Anything that can wait until tomorrow's digest
 
-If NO qualifying stories: respond with exactly the word NOTHING and nothing else.
+If nothing qualifies: respond with the single word NOTHING.
 
-If YES: write a plain-text alert for up to 3 qualifying stories.
-For each: headline on its own line, 3-4 sentences (what happened, why it matters, immediate implication), then the URL on its own line. Blank line between stories.
-No markdown. No filler.
+If something qualifies: write a plain-text alert for up to 3 stories.
+For each: headline on its own line, then 3-4 sentences in plain business language \
+(what happened, who it affects, what it means for the market), then the URL.
+Blank line between stories. No markdown.
 
-Articles:
+Articles from the last 6 hours:
 {articles_text}"""
 
     msg = Anthropic(api_key=ANTHROPIC_API_KEY).messages.create(
@@ -316,7 +313,7 @@ def _render_html(body: str, is_breaking: bool = False) -> str:
     lines      = body.strip().split("\n")
     html_parts = []
     in_summary = False
-    prev_type  = None  # "header", "tier", "headline", "body", "url", "blank"
+    prev_type  = None
 
     for line in lines:
         stripped = line.strip()
@@ -366,7 +363,6 @@ def _render_html(body: str, is_breaking: bool = False) -> str:
             prev_type = "body"
             continue
 
-        # Headline: line that follows a header, tier, or blank-after-url
         is_headline = (
             prev_type in ("header", "tier") or
             (prev_type == "blank" and len(html_parts) >= 2 and 'href=' in html_parts[-2])
@@ -409,7 +405,7 @@ def _render_html(body: str, is_breaking: bool = False) -> str:
 
   <tr><td style="padding:14px 44px;border-top:1px solid #ebebeb;background:#fafaf8;">
     <p style="margin:0;font-family:sans-serif;font-size:11px;color:#bbb;">
-      Mon &middot; Wed &middot; Fri &middot; 08:00 Brussels
+      Daily &middot; 08:00 Brussels
     </p>
   </td></tr>
 
@@ -441,7 +437,7 @@ def run_digest():
 
     print("[digest] Enriching top articles with full text...")
     buckets["tech"]  = enrich_top_articles(buckets["tech"],  n=8)
-    buckets["deals"] = enrich_top_articles(buckets["deals"], n=10)
+    buckets["deals"] = enrich_top_articles(buckets["deals"], n=12)
     buckets["vc"]    = enrich_top_articles(buckets["vc"],    n=6)
 
     total = sum(len(v) for v in buckets.values())
@@ -449,7 +445,7 @@ def run_digest():
         print("[digest] No articles found, skipping.")
         return
 
-    print(f"[digest] {total} articles enriched — summarizing...")
+    print(f"[digest] {total} articles — summarizing...")
     summary = summarize_digest(buckets)
     day     = datetime.now().strftime("%A %d %b")
     send_email(subject=f"Tech digest — {day}", body=summary)
@@ -458,7 +454,6 @@ def run_digest():
 def run_breaking_check():
     print("[breaking] Fetching recent articles for relevance check...")
     buckets = fetch_rss_articles(hours_back=6)
-    # Still include HN as one signal but not as the gatekeeper
     buckets["tech"].extend(fetch_hn_top(min_score=100))
 
     summary = check_and_summarize_breaking(buckets)
