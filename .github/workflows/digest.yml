@@ -2,7 +2,9 @@ name: Tech digest
 
 on:
   schedule:
-    - cron: "0 7 * * 1,3,5"
+    # Daily digest — every day at 07:00 UTC (08:00 Brussels)
+    - cron: "0 7 * * *"
+    # Breaking news check — every 4 hours
     - cron: "0 */4 * * *"
   workflow_dispatch:
     inputs:
@@ -15,9 +17,9 @@ jobs:
   digest:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v5.6.0
         with:
           python-version: "3.12"
       - name: Install dependencies
